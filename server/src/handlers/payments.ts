@@ -1,84 +1,195 @@
+import { db } from '../db';
+import { paymentsTable, couponsTable, coursesTable, usersTable, enrollmentsTable } from '../db/schema';
 import { type CreatePaymentInput, type Payment, type CreateCouponInput, type Coupon } from '../schema';
+import { eq, and, or, isNull, lt, gte } from 'drizzle-orm';
 
 export async function createPayment(input: CreatePaymentInput, userId: number): Promise<Payment> {
-  // This is a placeholder declaration! Real code should be implemented here.
-  // The goal of this handler is to create a payment record,
-  // apply coupon discounts if provided, and integrate with payment gateway.
-  return Promise.resolve({
-    id: 0,
-    user_id: userId,
-    course_id: input.course_id,
-    amount: 99.99,
-    original_amount: 129.99,
-    coupon_id: null,
-    status: 'pending',
-    payment_method: input.payment_method,
-    transaction_id: null,
-    created_at: new Date(),
-    updated_at: new Date()
-  } as Payment);
+  try {
+    // Verify user and course exist
+    const user = await db.select()
+      .from(usersTable)
+      .where(eq(usersTable.id, userId))
+      .execute();
+
+    if (user.length === 0) {
+      throw new Error('User not found');
+    }
+
+    const course = await db.select()
+      .from(coursesTable)
+      .where(eq(coursesTable.id, input.course_id))
+      .execute();
+
+    if (course.length === 0) {
+      throw new Error('Course not found');
+    }
+
+    let originalAmount = parseFloat(course[0].price);
+    let finalAmount = originalAmount;
+    let couponId = null;
+
+    // Apply coupon if provided
+    if (input.coupon_code) {
+      const couponValidation = await validateCoupon(input.coupon_code, input.course_id);
+      if (couponValidation.valid && couponValidation.coupon && couponValidation.discountAmount !== undefined) {
+        couponId = couponValidation.coupon.id;
+        finalAmount = originalAmount - couponValidation.discountAmount;
+        
+        // Increment coupon usage
+        await db.update(couponsTable)
+          .set({ used_count: couponValidation.coupon.used_count + 1 })
+          .where(eq(couponsTable.id, couponId))
+          .execute();
+      }
+    }
+
+    // Create payment record
+    const result = await db.insert(paymentsTable)
+      .values({
+        user_id: userId,
+        course_id: input.course_id,
+        amount: finalAmount.toString(),
+        original_amount: originalAmount.toString(),
+        coupon_id: couponId,
+        status: 'pending',
+        payment_method: input.payment_method,
+        transaction_id: null
+      })
+      .returning()
+      .execute();
+
+    const payment = result[0];
+    return {
+      ...payment,
+      amount: parseFloat(payment.amount),
+      original_amount: parseFloat(payment.original_amount)
+    };
+  } catch (error) {
+    console.error('Payment creation failed:', error);
+    throw error;
+  }
 }
 
 export async function processPayment(paymentId: number, transactionId: string): Promise<Payment> {
-  // This is a placeholder declaration! Real code should be implemented here.
-  // The goal of this handler is to update payment status after gateway confirmation,
-  // trigger enrollment creation, and send payment confirmation.
-  return Promise.resolve({
-    id: paymentId,
-    user_id: 1,
-    course_id: 1,
-    amount: 99.99,
-    original_amount: 99.99,
-    coupon_id: null,
-    status: 'completed',
-    payment_method: 'credit_card',
-    transaction_id: transactionId,
-    created_at: new Date(),
-    updated_at: new Date()
-  } as Payment);
+  try {
+    // Update payment status
+    const result = await db.update(paymentsTable)
+      .set({ 
+        status: 'completed',
+        transaction_id: transactionId,
+        updated_at: new Date()
+      })
+      .where(eq(paymentsTable.id, paymentId))
+      .returning()
+      .execute();
+
+    if (result.length === 0) {
+      throw new Error('Payment not found');
+    }
+
+    const payment = result[0];
+
+    // Create enrollment for the user
+    await db.insert(enrollmentsTable)
+      .values({
+        student_id: payment.user_id,
+        course_id: payment.course_id,
+        enrollment_date: new Date(),
+        progress_percentage: 0,
+        is_completed: false
+      })
+      .execute();
+
+    return {
+      ...payment,
+      amount: parseFloat(payment.amount),
+      original_amount: parseFloat(payment.original_amount)
+    };
+  } catch (error) {
+    console.error('Payment processing failed:', error);
+    throw error;
+  }
 }
 
 export async function getUserPayments(userId: number): Promise<Payment[]> {
-  // This is a placeholder declaration! Real code should be implemented here.
-  // The goal of this handler is to fetch all payments made by a user
-  // for payment history and receipt access.
-  return [];
+  try {
+    const payments = await db.select()
+      .from(paymentsTable)
+      .where(eq(paymentsTable.user_id, userId))
+      .execute();
+
+    return payments.map(payment => ({
+      ...payment,
+      amount: parseFloat(payment.amount),
+      original_amount: parseFloat(payment.original_amount)
+    }));
+  } catch (error) {
+    console.error('Failed to fetch user payments:', error);
+    throw error;
+  }
 }
 
 export async function refundPayment(paymentId: number, reason: string): Promise<Payment> {
-  // This is a placeholder declaration! Real code should be implemented here.
-  // The goal of this handler is to process payment refunds,
-  // update payment status, and handle enrollment cancellation.
-  return Promise.resolve({
-    id: paymentId,
-    user_id: 1,
-    course_id: 1,
-    amount: 99.99,
-    original_amount: 99.99,
-    coupon_id: null,
-    status: 'refunded',
-    payment_method: 'credit_card',
-    transaction_id: 'txn_12345',
-    created_at: new Date(),
-    updated_at: new Date()
-  } as Payment);
+  try {
+    // Update payment status to refunded
+    const result = await db.update(paymentsTable)
+      .set({ 
+        status: 'refunded',
+        updated_at: new Date()
+      })
+      .where(eq(paymentsTable.id, paymentId))
+      .returning()
+      .execute();
+
+    if (result.length === 0) {
+      throw new Error('Payment not found');
+    }
+
+    const payment = result[0];
+
+    // Remove enrollment (cancel access)
+    await db.delete(enrollmentsTable)
+      .where(and(
+        eq(enrollmentsTable.student_id, payment.user_id),
+        eq(enrollmentsTable.course_id, payment.course_id)
+      ))
+      .execute();
+
+    return {
+      ...payment,
+      amount: parseFloat(payment.amount),
+      original_amount: parseFloat(payment.original_amount)
+    };
+  } catch (error) {
+    console.error('Payment refund failed:', error);
+    throw error;
+  }
 }
 
 export async function createCoupon(input: CreateCouponInput): Promise<Coupon> {
-  // This is a placeholder declaration! Real code should be implemented here.
-  // The goal of this handler is to create discount coupons for courses,
-  // validate coupon parameters, and set usage limits.
-  return Promise.resolve({
-    id: 0,
-    code: input.code,
-    discount_type: input.discount_type,
-    discount_value: input.discount_value,
-    max_uses: input.max_uses,
-    used_count: 0,
-    expires_at: input.expires_at,
-    is_active: true,
-    created_at: new Date()
-  } as Coupon);
+  try {
+    const result = await db.insert(couponsTable)
+      .values({
+        code: input.code,
+        discount_type: input.discount_type,
+        discount_value: input.discount_value.toString(),
+        max_uses: input.max_uses,
+        used_count: 0,
+        expires_at: input.expires_at,
+        is_active: true
+      })
+      .returning()
+      .execute();
+
+    const coupon = result[0];
+    return {
+      ...coupon,
+      discount_value: parseFloat(coupon.discount_value)
+    };
+  } catch (error) {
+    console.error('Coupon creation failed:', error);
+    throw error;
+  }
 }
 
 export async function validateCoupon(couponCode: string, courseId: number): Promise<{
@@ -87,35 +198,128 @@ export async function validateCoupon(couponCode: string, courseId: number): Prom
   discountAmount?: number;
   message?: string;
 }> {
-  // This is a placeholder declaration! Real code should be implemented here.
-  // The goal of this handler is to validate coupon codes,
-  // check expiration, usage limits, and calculate discount amount.
-  return {
-    valid: false,
-    message: 'Coupon not found or expired'
-  };
+  try {
+    // Find the coupon
+    const coupons = await db.select()
+      .from(couponsTable)
+      .where(eq(couponsTable.code, couponCode))
+      .execute();
+
+    if (coupons.length === 0) {
+      return {
+        valid: false,
+        message: 'Coupon not found'
+      };
+    }
+
+    const coupon = {
+      ...coupons[0],
+      discount_value: parseFloat(coupons[0].discount_value)
+    };
+
+    // Check if coupon is active
+    if (!coupon.is_active) {
+      return {
+        valid: false,
+        coupon,
+        message: 'Coupon is inactive'
+      };
+    }
+
+    // Check expiration
+    if (coupon.expires_at && new Date() > coupon.expires_at) {
+      return {
+        valid: false,
+        coupon,
+        message: 'Coupon has expired'
+      };
+    }
+
+    // Check usage limits
+    if (coupon.max_uses !== null && coupon.used_count >= coupon.max_uses) {
+      return {
+        valid: false,
+        coupon,
+        message: 'Coupon usage limit exceeded'
+      };
+    }
+
+    // Get course price to calculate discount
+    const courses = await db.select()
+      .from(coursesTable)
+      .where(eq(coursesTable.id, courseId))
+      .execute();
+
+    if (courses.length === 0) {
+      return {
+        valid: false,
+        coupon,
+        message: 'Course not found'
+      };
+    }
+
+    const coursePrice = parseFloat(courses[0].price);
+    let discountAmount = 0;
+
+    if (coupon.discount_type === 'percentage') {
+      discountAmount = coursePrice * (coupon.discount_value / 100);
+    } else {
+      discountAmount = coupon.discount_value;
+    }
+
+    // Ensure discount doesn't exceed course price
+    discountAmount = Math.min(discountAmount, coursePrice);
+
+    return {
+      valid: true,
+      coupon,
+      discountAmount,
+      message: 'Coupon is valid'
+    };
+  } catch (error) {
+    console.error('Coupon validation failed:', error);
+    return {
+      valid: false,
+      message: 'Error validating coupon'
+    };
+  }
 }
 
 export async function getCoupons(): Promise<Coupon[]> {
-  // This is a placeholder declaration! Real code should be implemented here.
-  // The goal of this handler is to fetch all coupons for admin management
-  // with usage statistics and status information.
-  return [];
+  try {
+    const coupons = await db.select()
+      .from(couponsTable)
+      .execute();
+
+    return coupons.map(coupon => ({
+      ...coupon,
+      discount_value: parseFloat(coupon.discount_value)
+    }));
+  } catch (error) {
+    console.error('Failed to fetch coupons:', error);
+    throw error;
+  }
 }
 
 export async function deactivateCoupon(couponId: number): Promise<Coupon> {
-  // This is a placeholder declaration! Real code should be implemented here.
-  // The goal of this handler is to deactivate a coupon,
-  // preventing further usage while preserving historical data.
-  return Promise.resolve({
-    id: couponId,
-    code: 'DEACTIVATED',
-    discount_type: 'percentage',
-    discount_value: 0,
-    max_uses: null,
-    used_count: 0,
-    expires_at: null,
-    is_active: false,
-    created_at: new Date()
-  } as Coupon);
+  try {
+    const result = await db.update(couponsTable)
+      .set({ is_active: false })
+      .where(eq(couponsTable.id, couponId))
+      .returning()
+      .execute();
+
+    if (result.length === 0) {
+      throw new Error('Coupon not found');
+    }
+
+    const coupon = result[0];
+    return {
+      ...coupon,
+      discount_value: parseFloat(coupon.discount_value)
+    };
+  } catch (error) {
+    console.error('Coupon deactivation failed:', error);
+    throw error;
+  }
 }

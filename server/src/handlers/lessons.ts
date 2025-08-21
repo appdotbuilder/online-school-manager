@@ -1,22 +1,43 @@
+import { db } from '../db';
+import { lessonsTable, coursesTable } from '../db/schema';
 import { type CreateLessonInput, type Lesson } from '../schema';
+import { eq } from 'drizzle-orm';
 
 export async function createLesson(input: CreateLessonInput): Promise<Lesson> {
-  // This is a placeholder declaration! Real code should be implemented here.
-  // The goal of this handler is to create a new lesson for a course,
-  // validate instructor permissions for the course, and persist lesson data.
-  return Promise.resolve({
-    id: 0,
-    course_id: input.course_id,
-    title: input.title,
-    description: input.description,
-    video_url: input.video_url,
-    content: input.content,
-    order_index: input.order_index,
-    duration_minutes: input.duration_minutes,
-    is_published: false,
-    created_at: new Date(),
-    updated_at: new Date()
-  } as Lesson);
+  try {
+    // First verify the course exists
+    const course = await db.select()
+      .from(coursesTable)
+      .where(eq(coursesTable.id, input.course_id))
+      .execute();
+
+    if (course.length === 0) {
+      throw new Error('Course not found');
+    }
+
+    // Insert the lesson record
+    const result = await db.insert(lessonsTable)
+      .values({
+        course_id: input.course_id,
+        title: input.title,
+        description: input.description,
+        video_url: input.video_url,
+        content: input.content,
+        order_index: input.order_index,
+        duration_minutes: input.duration_minutes
+      })
+      .returning()
+      .execute();
+
+    const lesson = result[0];
+    return {
+      ...lesson,
+      // No numeric conversions needed - all fields are already appropriate types
+    };
+  } catch (error) {
+    console.error('Lesson creation failed:', error);
+    throw error;
+  }
 }
 
 export async function getLessonsByCourse(courseId: number): Promise<Lesson[]> {

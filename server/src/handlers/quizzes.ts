@@ -1,106 +1,335 @@
-import { type CreateQuizInput, type Quiz, type CreateQuizQuestionInput, type QuizQuestion, type SubmitQuizInput, type QuizAttempt } from '../schema';
+import { db } from '../db';
+import { 
+  quizzesTable, 
+  quizQuestionsTable, 
+  quizAttemptsTable, 
+  lessonsTable,
+  coursesTable,
+  usersTable
+} from '../db/schema';
+import { 
+  type CreateQuizInput, 
+  type Quiz, 
+  type CreateQuizQuestionInput, 
+  type QuizQuestion, 
+  type SubmitQuizInput, 
+  type QuizAttempt 
+} from '../schema';
+import { eq, and, asc } from 'drizzle-orm';
 
 export async function createQuiz(input: CreateQuizInput): Promise<Quiz> {
-  // This is a placeholder declaration! Real code should be implemented here.
-  // The goal of this handler is to create a new quiz for a lesson,
-  // validate instructor permissions, and persist quiz data.
-  return Promise.resolve({
-    id: 0,
-    lesson_id: input.lesson_id,
-    title: input.title,
-    description: input.description,
-    passing_score: input.passing_score,
-    time_limit_minutes: input.time_limit_minutes,
-    max_attempts: input.max_attempts,
-    is_active: true,
-    created_at: new Date(),
-    updated_at: new Date()
-  } as Quiz);
+  try {
+    // Verify lesson exists
+    const lesson = await db.select()
+      .from(lessonsTable)
+      .where(eq(lessonsTable.id, input.lesson_id))
+      .execute();
+
+    if (lesson.length === 0) {
+      throw new Error('Lesson not found');
+    }
+
+    const result = await db.insert(quizzesTable)
+      .values({
+        lesson_id: input.lesson_id,
+        title: input.title,
+        description: input.description,
+        passing_score: input.passing_score,
+        time_limit_minutes: input.time_limit_minutes,
+        max_attempts: input.max_attempts,
+        is_active: true
+      })
+      .returning()
+      .execute();
+
+    return result[0];
+  } catch (error) {
+    console.error('Quiz creation failed:', error);
+    throw error;
+  }
 }
 
 export async function createQuizQuestion(input: CreateQuizQuestionInput): Promise<QuizQuestion> {
-  // This is a placeholder declaration! Real code should be implemented here.
-  // The goal of this handler is to add questions to a quiz,
-  // validate instructor permissions, and handle different question types.
-  return Promise.resolve({
-    id: 0,
-    quiz_id: input.quiz_id,
-    question_text: input.question_text,
-    question_type: input.question_type,
-    options: input.options,
-    correct_answer: input.correct_answer,
-    points: input.points,
-    order_index: input.order_index,
-    created_at: new Date()
-  } as QuizQuestion);
+  try {
+    // Verify quiz exists
+    const quiz = await db.select()
+      .from(quizzesTable)
+      .where(eq(quizzesTable.id, input.quiz_id))
+      .execute();
+
+    if (quiz.length === 0) {
+      throw new Error('Quiz not found');
+    }
+
+    const result = await db.insert(quizQuestionsTable)
+      .values({
+        quiz_id: input.quiz_id,
+        question_text: input.question_text,
+        question_type: input.question_type,
+        options: input.options,
+        correct_answer: input.correct_answer,
+        points: input.points,
+        order_index: input.order_index
+      })
+      .returning()
+      .execute();
+
+    // Convert points from string to number and cast options type
+    const question = result[0];
+    return {
+      ...question,
+      points: typeof question.points === 'string' ? parseInt(question.points) : question.points,
+      options: question.options as string[] | null
+    };
+  } catch (error) {
+    console.error('Quiz question creation failed:', error);
+    throw error;
+  }
 }
 
 export async function getQuizById(quizId: number): Promise<Quiz | null> {
-  // This is a placeholder declaration! Real code should be implemented here.
-  // The goal of this handler is to fetch quiz details with questions
-  // for quiz taking interface (without correct answers for students).
-  return null;
+  try {
+    const result = await db.select()
+      .from(quizzesTable)
+      .where(eq(quizzesTable.id, quizId))
+      .execute();
+
+    return result.length > 0 ? result[0] : null;
+  } catch (error) {
+    console.error('Get quiz failed:', error);
+    throw error;
+  }
 }
 
 export async function getQuizQuestions(quizId: number, includeAnswers: boolean = false): Promise<QuizQuestion[]> {
-  // This is a placeholder declaration! Real code should be implemented here.
-  // The goal of this handler is to fetch quiz questions,
-  // optionally including correct answers for instructors/grading.
-  return [];
+  try {
+    const results = await db.select()
+      .from(quizQuestionsTable)
+      .where(eq(quizQuestionsTable.quiz_id, quizId))
+      .orderBy(asc(quizQuestionsTable.order_index))
+      .execute();
+
+    return results.map(question => {
+      const formattedQuestion = {
+        ...question,
+        points: typeof question.points === 'string' ? parseInt(question.points) : question.points,
+        options: question.options as string[] | null
+      };
+
+      // Hide correct answers from students
+      if (!includeAnswers) {
+        return {
+          ...formattedQuestion,
+          correct_answer: ''
+        };
+      }
+
+      return formattedQuestion;
+    });
+  } catch (error) {
+    console.error('Get quiz questions failed:', error);
+    throw error;
+  }
 }
 
 export async function submitQuiz(input: SubmitQuizInput, studentId: number): Promise<QuizAttempt> {
-  // This is a placeholder declaration! Real code should be implemented here.
-  // The goal of this handler is to process quiz submission,
-  // calculate score, check passing status, and record attempt.
-  return Promise.resolve({
-    id: 0,
-    quiz_id: input.quiz_id,
-    student_id: studentId,
-    score: 85,
-    total_points: 100,
-    answers: input.answers,
-    started_at: new Date(),
-    completed_at: new Date(),
-    is_passed: true
-  } as QuizAttempt);
+  try {
+    // Verify quiz exists
+    const quiz = await db.select()
+      .from(quizzesTable)
+      .where(eq(quizzesTable.id, input.quiz_id))
+      .execute();
+
+    if (quiz.length === 0) {
+      throw new Error('Quiz not found');
+    }
+
+    const currentQuiz = quiz[0];
+
+    // Check if student has exceeded max attempts
+    if (currentQuiz.max_attempts) {
+      const previousAttempts = await db.select()
+        .from(quizAttemptsTable)
+        .where(and(
+          eq(quizAttemptsTable.quiz_id, input.quiz_id),
+          eq(quizAttemptsTable.student_id, studentId)
+        ))
+        .execute();
+
+      if (previousAttempts.length >= currentQuiz.max_attempts) {
+        throw new Error('Maximum attempts exceeded');
+      }
+    }
+
+    // Get quiz questions with correct answers
+    const questions = await db.select()
+      .from(quizQuestionsTable)
+      .where(eq(quizQuestionsTable.quiz_id, input.quiz_id))
+      .execute();
+
+    // Calculate score
+    let score = 0;
+    let totalPoints = 0;
+
+    questions.forEach(question => {
+      const questionPoints = typeof question.points === 'string' ? parseInt(question.points) : question.points;
+      totalPoints += questionPoints;
+      
+      const studentAnswer = input.answers[question.id.toString()];
+      if (studentAnswer && studentAnswer.toLowerCase().trim() === question.correct_answer.toLowerCase().trim()) {
+        score += questionPoints;
+      }
+    });
+
+    // Calculate percentage and determine if passed
+    const percentage = totalPoints > 0 ? Math.round((score / totalPoints) * 100) : 0;
+    const isPassed = percentage >= currentQuiz.passing_score;
+
+    // Create quiz attempt
+    const result = await db.insert(quizAttemptsTable)
+      .values({
+        quiz_id: input.quiz_id,
+        student_id: studentId,
+        score,
+        total_points: totalPoints,
+        answers: input.answers,
+        started_at: new Date(),
+        completed_at: new Date(),
+        is_passed: isPassed
+      })
+      .returning()
+      .execute();
+
+    // Cast answers type for return
+    const attempt = result[0];
+    return {
+      ...attempt,
+      answers: attempt.answers as Record<string, string>
+    };
+  } catch (error) {
+    console.error('Quiz submission failed:', error);
+    throw error;
+  }
 }
 
 export async function getQuizAttempts(quizId: number, studentId: number): Promise<QuizAttempt[]> {
-  // This is a placeholder declaration! Real code should be implemented here.
-  // The goal of this handler is to fetch student's quiz attempt history
-  // for progress tracking and retake validation.
-  return [];
+  try {
+    const results = await db.select()
+      .from(quizAttemptsTable)
+      .where(and(
+        eq(quizAttemptsTable.quiz_id, quizId),
+        eq(quizAttemptsTable.student_id, studentId)
+      ))
+      .orderBy(asc(quizAttemptsTable.started_at))
+      .execute();
+
+    // Cast answers type for all results
+    return results.map(attempt => ({
+      ...attempt,
+      answers: attempt.answers as Record<string, string>
+    }));
+  } catch (error) {
+    console.error('Get quiz attempts failed:', error);
+    throw error;
+  }
 }
 
 export async function getStudentQuizAttempt(attemptId: number, studentId: number): Promise<QuizAttempt | null> {
-  // This is a placeholder declaration! Real code should be implemented here.
-  // The goal of this handler is to fetch specific quiz attempt details
-  // for review and feedback display.
-  return null;
+  try {
+    const result = await db.select()
+      .from(quizAttemptsTable)
+      .where(and(
+        eq(quizAttemptsTable.id, attemptId),
+        eq(quizAttemptsTable.student_id, studentId)
+      ))
+      .execute();
+
+    if (result.length === 0) {
+      return null;
+    }
+
+    // Cast answers type for return
+    const attempt = result[0];
+    return {
+      ...attempt,
+      answers: attempt.answers as Record<string, string>
+    };
+  } catch (error) {
+    console.error('Get student quiz attempt failed:', error);
+    throw error;
+  }
 }
 
 export async function updateQuiz(quizId: number, updates: Partial<CreateQuizInput>): Promise<Quiz> {
-  // This is a placeholder declaration! Real code should be implemented here.
-  // The goal of this handler is to update quiz settings,
-  // validate instructor permissions, and persist changes.
-  return Promise.resolve({
-    id: quizId,
-    lesson_id: updates.lesson_id || 1,
-    title: updates.title || 'Updated Quiz',
-    description: updates.description || null,
-    passing_score: updates.passing_score || 70,
-    time_limit_minutes: updates.time_limit_minutes || null,
-    max_attempts: updates.max_attempts || null,
-    is_active: true,
-    created_at: new Date(),
-    updated_at: new Date()
-  } as Quiz);
+  try {
+    // Verify quiz exists
+    const existingQuiz = await db.select()
+      .from(quizzesTable)
+      .where(eq(quizzesTable.id, quizId))
+      .execute();
+
+    if (existingQuiz.length === 0) {
+      throw new Error('Quiz not found');
+    }
+
+    // If lesson_id is being updated, verify the new lesson exists
+    if (updates.lesson_id) {
+      const lesson = await db.select()
+        .from(lessonsTable)
+        .where(eq(lessonsTable.id, updates.lesson_id))
+        .execute();
+
+      if (lesson.length === 0) {
+        throw new Error('Lesson not found');
+      }
+    }
+
+    const result = await db.update(quizzesTable)
+      .set({
+        ...updates,
+        updated_at: new Date()
+      })
+      .where(eq(quizzesTable.id, quizId))
+      .returning()
+      .execute();
+
+    return result[0];
+  } catch (error) {
+    console.error('Quiz update failed:', error);
+    throw error;
+  }
 }
 
 export async function deleteQuiz(quizId: number): Promise<{ success: boolean }> {
-  // This is a placeholder declaration! Real code should be implemented here.
-  // The goal of this handler is to delete quiz and all related data,
-  // validate instructor permissions, and handle cascading deletes (questions, attempts).
-  return Promise.resolve({ success: true });
+  try {
+    // Verify quiz exists
+    const existingQuiz = await db.select()
+      .from(quizzesTable)
+      .where(eq(quizzesTable.id, quizId))
+      .execute();
+
+    if (existingQuiz.length === 0) {
+      throw new Error('Quiz not found');
+    }
+
+    // Delete quiz questions first (foreign key dependency)
+    await db.delete(quizQuestionsTable)
+      .where(eq(quizQuestionsTable.quiz_id, quizId))
+      .execute();
+
+    // Delete quiz attempts
+    await db.delete(quizAttemptsTable)
+      .where(eq(quizAttemptsTable.quiz_id, quizId))
+      .execute();
+
+    // Delete the quiz
+    await db.delete(quizzesTable)
+      .where(eq(quizzesTable.id, quizId))
+      .execute();
+
+    return { success: true };
+  } catch (error) {
+    console.error('Quiz deletion failed:', error);
+    throw error;
+  }
 }
